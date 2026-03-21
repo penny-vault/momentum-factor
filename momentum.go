@@ -27,7 +27,6 @@ import (
 	"github.com/penny-vault/pvbt/data"
 	"github.com/penny-vault/pvbt/engine"
 	"github.com/penny-vault/pvbt/portfolio"
-	"github.com/penny-vault/pvbt/tradecron"
 )
 
 //go:embed README.md
@@ -45,15 +44,7 @@ func (s *MomentumFactor) Name() string {
 	return "Momentum Factor"
 }
 
-func (s *MomentumFactor) Setup(eng *engine.Engine) {
-	tc, err := tradecron.New("@monthend", tradecron.MarketHours{Open: 930, Close: 1600})
-	if err != nil {
-		panic(err)
-	}
-
-	eng.Schedule(tc)
-	eng.SetBenchmark(eng.Asset("VFINX"))
-}
+func (s *MomentumFactor) Setup(_ *engine.Engine) {}
 
 func (s *MomentumFactor) Describe() engine.StrategyDescription {
 	return engine.StrategyDescription{
@@ -62,10 +53,12 @@ func (s *MomentumFactor) Describe() engine.StrategyDescription {
 		Source:      "https://doi.org/10.1111/j.1540-6261.1993.tb04702.x",
 		Version:     "1.0.0",
 		VersionDate: time.Date(2026, 3, 15, 0, 0, 0, 0, time.UTC),
+		Schedule:    "@monthend",
+		Benchmark:   "VFINX",
 	}
 }
 
-func (s *MomentumFactor) Compute(ctx context.Context, eng *engine.Engine, strategyPortfolio portfolio.Portfolio) error {
+func (s *MomentumFactor) Compute(ctx context.Context, eng *engine.Engine, strategyPortfolio portfolio.Portfolio, batch *portfolio.Batch) error {
 	// 1. Get the index universe for the current date.
 	indexUniverse := eng.IndexUniverse(s.IndexName)
 
@@ -140,11 +133,10 @@ func (s *MomentumFactor) Compute(ctx context.Context, eng *engine.Engine, strate
 		members[sm.stock] = weight
 	}
 
-	ts := eng.CurrentDate().Unix()
 	justification := fmt.Sprintf("top %d/%d by 12-1 momentum from %s", topCount, len(ranked), s.IndexName)
 
-	strategyPortfolio.Annotate(ts, "universe-size", fmt.Sprintf("%d", len(ranked)))
-	strategyPortfolio.Annotate(ts, "justification", justification)
+	batch.Annotate("universe-size", fmt.Sprintf("%d", len(ranked)))
+	batch.Annotate("justification", justification)
 
 	allocation := portfolio.Allocation{
 		Date:          eng.CurrentDate(),
@@ -152,7 +144,7 @@ func (s *MomentumFactor) Compute(ctx context.Context, eng *engine.Engine, strate
 		Justification: justification,
 	}
 
-	if err := strategyPortfolio.RebalanceTo(ctx, allocation); err != nil {
+	if err := batch.RebalanceTo(ctx, allocation); err != nil {
 		return fmt.Errorf("rebalance failed: %w", err)
 	}
 
