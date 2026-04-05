@@ -15,8 +15,11 @@
 
 package main
 
-import "github.com/penny-vault/pvbt/cli"
+import (
+	"github.com/penny-vault/momentum-factor/mom"
+	"github.com/penny-vault/pvbt/cli"
+)
 
 func main() {
-	cli.Run(&MomentumFactor{})
+	cli.Run(&mom.MomentumFactor{})
 }

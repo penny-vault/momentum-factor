@@ -12,3 +12,6 @@ go.work
 go.work.sum
 .env
 momentum-factor
+*.db
+!mom/testdata/snapshot.db
+*.prof
