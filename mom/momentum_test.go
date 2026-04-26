@@ -117,8 +117,11 @@ var _ = Describe("MomentumFactor", func() {
 
 		// NVDA was the top momentum stock in Jan 2024 (153% 12-1 momentum)
 		Expect(firstRebalanceTickers).To(HaveKey("NVDA"))
-		// META had 138% momentum
-		Expect(firstRebalanceTickers).To(HaveKey("META"))
+		// META had 138% momentum (older snapshots may carry the predecessor FB ticker)
+		Expect(firstRebalanceTickers).To(SatisfyAny(
+			HaveKey("META"),
+			HaveKey("FB"),
+		))
 		// AMD had 96% momentum
 		Expect(firstRebalanceTickers).To(HaveKey("AMD"))
 	})
