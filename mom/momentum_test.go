@@ -43,7 +43,7 @@ var _ = Describe("MomentumFactor", func() {
 	})
 
 	runBacktest := func() portfolio.Portfolio {
-		strategy := &mom.MomentumFactor{}
+		strategy := &mom.MomentumFactor{IndexName: "SPX"}
 		acct := portfolio.New(
 			portfolio.WithCash(100000, startDate),
 			portfolio.WithAllMetrics(),

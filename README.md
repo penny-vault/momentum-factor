@@ -16,8 +16,8 @@ The 1-month skip avoids the well-documented short-term reversal effect where las
 
 ## Parameters
 
-- **Index**: Which stock universe to draw from (default: S&P 500)
-- **Top Holdings**: Number of stocks to hold (default: 50, roughly top decile of S&P 500)
+- **Index**: Which stock universe to draw from (default: us-tradable, the broad US tradable universe)
+- **Top Holdings**: Number of stocks to hold (default: 50)
 
 ## References
 

@@ -36,7 +36,7 @@ var description string
 // strategy. It ranks stocks by their 12-month return excluding the most recent
 // month, then buys the top holdings equal-weighted.
 type MomentumFactor struct {
-	IndexName   string `pvbt:"index" desc:"Stock index universe to select from" default:"SPX" suggest:"SPX=SPX|NDX=NDX"`
+	IndexName   string `pvbt:"index" desc:"Stock index universe to select from" default:"us-tradable" suggest:"us-tradable=us-tradable|SPX=SPX|NDX=NDX"`
 	TopHoldings int    `pvbt:"top-holdings" desc:"Number of top momentum stocks to hold" default:"50" suggest:"SP500=50|NASDAQ100=10"`
 }
 
@@ -51,8 +51,8 @@ func (s *MomentumFactor) Describe() engine.StrategyDescription {
 		ShortCode:   "mom",
 		Description: description,
 		Source:      "https://doi.org/10.1111/j.1540-6261.1993.tb04702.x",
-		Version:     "1.0.0",
-		VersionDate: time.Date(2026, 3, 15, 0, 0, 0, 0, time.UTC),
+		Version:     "1.1.0",
+		VersionDate: time.Date(2026, 5, 3, 0, 0, 0, 0, time.UTC),
 		Schedule:    "@monthend",
 		Benchmark:   "VFINX",
 	}
