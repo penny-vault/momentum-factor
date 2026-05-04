@@ -32,12 +32,17 @@ import (
 //go:embed README.md
 var description string
 
-// MomentumFactor implements the classic Jegadeesh & Titman (1993) 12-1 momentum
-// strategy. It ranks stocks by their 12-month return excluding the most recent
-// month, then buys the top holdings equal-weighted.
+// MomentumFactor implements 12-1 momentum stock selection with optional
+// Frog-In-the-Pan (FIP) smoothness filtering and a market-cap floor. The
+// vanilla configuration (FipQuantile=1.0, MinMarketCap=0) reduces to the
+// classic Jegadeesh & Titman (1993) strategy. The default configuration
+// (FipQuantile=0.5, MinMarketCap=1e9) implements the Gray & Vogel (2016)
+// "Quantitative Momentum" formulation.
 type MomentumFactor struct {
-	IndexName   string `pvbt:"index" desc:"Stock index universe to select from" default:"us-tradable" suggest:"us-tradable=us-tradable|SPX=SPX|NDX=NDX"`
-	TopHoldings int    `pvbt:"top-holdings" desc:"Number of top momentum stocks to hold" default:"50" suggest:"SP500=50|NASDAQ100=10"`
+	IndexName    string  `pvbt:"index" desc:"Stock index universe to select from" default:"us-tradable" suggest:"us-tradable=us-tradable|SPX=SPX|NDX=NDX"`
+	TopHoldings  int     `pvbt:"top-holdings" desc:"Final number of stocks to hold (after the FIP filter halves the momentum cut)" default:"50" suggest:"SP500=50|NASDAQ100=10"`
+	FipQuantile  float64 `pvbt:"fip-quantile" desc:"Of the momentum-ranked stocks, smoothest fraction by FIP to hold; 1.0 disables the FIP filter" default:"0.50" suggest:"classic=1.0|qmom=0.50"`
+	MinMarketCap float64 `pvbt:"min-market-cap" desc:"Minimum market capitalization (USD); set negative to disable" default:"1000000000" suggest:"classic=-1|qmom=1000000000"`
 }
 
 func (s *MomentumFactor) Name() string {
@@ -51,93 +56,205 @@ func (s *MomentumFactor) Describe() engine.StrategyDescription {
 		ShortCode:   "mom",
 		Description: description,
 		Source:      "https://doi.org/10.1111/j.1540-6261.1993.tb04702.x",
-		Version:     "1.1.0",
+		Version:     "1.0.0",
 		VersionDate: time.Date(2026, 5, 3, 0, 0, 0, 0, time.UTC),
 		Schedule:    "@monthend",
 		Benchmark:   "VFINX",
 	}
 }
 
-func (s *MomentumFactor) Compute(ctx context.Context, eng *engine.Engine, strategyPortfolio portfolio.Portfolio, batch *portfolio.Batch) error {
-	// 1. Get the index universe for the current date.
+func (s *MomentumFactor) Compute(ctx context.Context, eng *engine.Engine, _ portfolio.Portfolio, batch *portfolio.Batch) error {
+	topHoldings := s.TopHoldings
+	if topHoldings < 1 {
+		topHoldings = 50
+	}
+
+	fipQuantile := s.FipQuantile
+	if fipQuantile <= 0 || fipQuantile > 1 {
+		fipQuantile = 0.50
+	}
+	// Momentum-rank cut size: pick enough names that the FIP halving lands at
+	// topHoldings. With FipQuantile=0.50 and TopHoldings=50 this is 100; with
+	// FipQuantile=1.0 it equals TopHoldings (FIP off).
+	momentumCutTarget := int(math.Round(float64(topHoldings) / fipQuantile))
+	if momentumCutTarget < topHoldings {
+		momentumCutTarget = topHoldings
+	}
+
 	indexUniverse := eng.IndexUniverse(s.IndexName)
 
-	// 2. Fetch 13-month window of monthly close prices for all members.
-	//    We need 13 months because Pct(12) requires 13 data points to compute
-	//    a 12-period return, and we also skip the most recent month.
-	priceDF, err := indexUniverse.Window(ctx, portfolio.Months(13), data.MetricClose)
+	// One daily window covers both the monthly 12-1 momentum signal (after
+	// downsampling) and the per-stock daily FIP analysis when enabled.
+	dailyDF, err := indexUniverse.Window(ctx, portfolio.Months(13), data.MetricClose)
 	if err != nil {
 		return fmt.Errorf("failed to fetch index prices: %w", err)
 	}
 
-	// 3. Downsample to monthly frequency.
-	monthly := priceDF.Downsample(data.Monthly).Last()
+	// Optional market-cap filter: Gray/Vogel exclude microcaps before ranking
+	// because momentum on illiquid microcaps degenerates into noise.
+	qualifyingByMarketCap := map[asset.Asset]bool{}
 
-	// Need at least 13 rows: 12 months of history + current month.
+	useMarketCapFilter := s.MinMarketCap > 0
+	if useMarketCapFilter {
+		mcDF, err := indexUniverse.At(ctx, data.MarketCap)
+		if err != nil {
+			return fmt.Errorf("failed to fetch market caps: %w", err)
+		}
+
+		for _, stock := range mcDF.AssetList() {
+			mc := mcDF.Value(stock, data.MarketCap)
+			if !math.IsNaN(mc) && mc >= s.MinMarketCap {
+				qualifyingByMarketCap[stock] = true
+			}
+		}
+	}
+
+	monthly := dailyDF.Downsample(data.Monthly).Last()
 	if monthly.Len() < 13 {
 		return nil
 	}
 
-	// 4. Compute 12-1 momentum: return from t-12 to t-1 (skip most recent month).
-	//    This is the 12-month return as of last month, not as of today.
-	//    ret12 = price[t-1] / price[t-12] - 1
-	//    We drop the last row (current month) before computing Pct(11) on the remaining data,
-	//    or equivalently: compute Pct(11) on data lagged by 1.
-	//
-	//    Simpler approach: compute the 12-month return, then the 1-month return,
-	//    and derive 12-1 as: (1 + ret12) / (1 + ret1) - 1
+	// 12-1 momentum = (1 + ret12) / (1 + ret1) - 1, the return from month
+	// t-12 to t-1, dropping the most recent month to avoid short-term
+	// reversal contamination.
 	ret12 := monthly.Pct(12)
 	ret1 := monthly.Pct(1)
-
-	// 12-1 momentum = (1 + ret12) / (1 + ret1) - 1
-	// Take only the last row; individual NaN scores are filtered in the ranking loop.
 	momentum := ret12.AddScalar(1).Div(ret1.AddScalar(1)).AddScalar(-1).Last()
 
 	if momentum.Len() == 0 {
 		return nil
 	}
 
-	// 5. Rank all stocks by 12-1 momentum descending, select top holdings.
-	type stockMomentum struct {
-		stock asset.Asset
-		score float64
-	}
+	useFipFilter := fipQuantile < 1.0
 
-	var ranked []stockMomentum
+	// FIP needs the second-to-last monthly bar's date to bound the formation
+	// window when enabled. When disabled, this branch is skipped.
+	var (
+		cutoffIdx  int
+		dailyTimes []time.Time
+	)
 
-	for _, stock := range momentum.AssetList() {
-		score := momentum.Value(stock, data.MetricClose)
-		if !math.IsNaN(score) {
-			ranked = append(ranked, stockMomentum{stock: stock, score: score})
+	if useFipFilter {
+		monthlyTimes := monthly.Times()
+		if len(monthlyTimes) < 2 {
+			return nil
+		}
+
+		fipCutoff := monthlyTimes[len(monthlyTimes)-2]
+		dailyTimes = dailyDF.Times()
+
+		cutoffIdx = lastIdxOnOrBefore(dailyTimes, fipCutoff)
+		if cutoffIdx < 2 {
+			return nil
 		}
 	}
 
-	sort.Slice(ranked, func(i, j int) bool {
-		return ranked[i].score > ranked[j].score
-	})
-
-	topCount := s.TopHoldings
-	if topCount > len(ranked) {
-		topCount = len(ranked)
+	type stockScore struct {
+		stock asset.Asset
+		mom   float64
+		fip   float64
 	}
 
-	if topCount == 0 {
+	ranked := make([]stockScore, 0, len(momentum.AssetList()))
+	for _, stock := range momentum.AssetList() {
+		if useMarketCapFilter && !qualifyingByMarketCap[stock] {
+			continue
+		}
+
+		score := momentum.Value(stock, data.MetricClose)
+		if !math.IsNaN(score) {
+			ranked = append(ranked, stockScore{stock: stock, mom: score})
+		}
+	}
+
+	if len(ranked) == 0 {
 		return nil
 	}
 
-	selected := ranked[:topCount]
+	sort.Slice(ranked, func(i, j int) bool {
+		return ranked[i].mom > ranked[j].mom
+	})
 
-	// 6. Equal weight across selected stocks.
-	weight := 1.0 / float64(topCount)
-	members := make(map[asset.Asset]float64, topCount)
+	momentumCount := momentumCutTarget
+	if momentumCount > len(ranked) {
+		momentumCount = len(ranked)
+	}
 
+	momentumWinners := ranked[:momentumCount]
+
+	// Final selection. With FIP enabled we re-rank the momentum winners by
+	// smoothness and keep the top half; otherwise momentum winners are the
+	// final selection.
+	var selected []stockScore
+
+	if useFipFilter {
+		for idx := range momentumWinners {
+			prices := dailyDF.Column(momentumWinners[idx].stock, data.MetricClose)
+			if cutoffIdx >= len(prices) {
+				momentumWinners[idx].fip = math.NaN()
+				continue
+			}
+
+			momentumWinners[idx].fip = computeFIP(prices[:cutoffIdx+1], momentumWinners[idx].mom)
+		}
+
+		valid := make([]stockScore, 0, len(momentumWinners))
+		for _, w := range momentumWinners {
+			if !math.IsNaN(w.fip) {
+				valid = append(valid, w)
+			}
+		}
+
+		if len(valid) == 0 {
+			return nil
+		}
+
+		// Lower (more negative) FIP = smoother return path = better persistence.
+		sort.Slice(valid, func(i, j int) bool {
+			return valid[i].fip < valid[j].fip
+		})
+
+		fipCount := int(math.Round(float64(len(valid)) * fipQuantile))
+		if fipCount < 1 {
+			fipCount = 1
+		}
+
+		if fipCount > len(valid) {
+			fipCount = len(valid)
+		}
+
+		selected = valid[:fipCount]
+	} else {
+		selected = momentumWinners
+	}
+
+	weight := 1.0 / float64(len(selected))
+
+	members := make(map[asset.Asset]float64, len(selected))
 	for _, sm := range selected {
 		members[sm.stock] = weight
 	}
 
-	justification := fmt.Sprintf("top %d/%d by 12-1 momentum from %s", topCount, len(ranked), s.IndexName)
+	mcSuffix := ""
+	if useMarketCapFilter {
+		mcSuffix = fmt.Sprintf(" (min mc $%.0fM)", s.MinMarketCap/1e6)
+	}
+
+	var justification string
+	if useFipFilter {
+		justification = fmt.Sprintf(
+			"top %d/%d by smoothest FIP within top %d/%d 12-1 momentum from %s%s",
+			len(selected), len(momentumWinners), momentumCount, len(ranked), s.IndexName, mcSuffix,
+		)
+	} else {
+		justification = fmt.Sprintf(
+			"top %d/%d by 12-1 momentum from %s%s",
+			len(selected), len(ranked), s.IndexName, mcSuffix,
+		)
+	}
 
 	batch.Annotate("universe-size", fmt.Sprintf("%d", len(ranked)))
+	batch.Annotate("momentum-winners", fmt.Sprintf("%d", momentumCount))
 	batch.Annotate("justification", justification)
 
 	allocation := portfolio.Allocation{
@@ -151,4 +268,69 @@ func (s *MomentumFactor) Compute(ctx context.Context, eng *engine.Engine, strate
 	}
 
 	return nil
+}
+
+// computeFIP returns the Frog-In-the-Pan score from Da, Gurun & Warachka
+// (2014): sign(PRET) * (%neg - %pos), where %pos and %neg are the fractions
+// of trading days in the formation window with positive and negative
+// returns. For a winner (PRET > 0), a smooth uptrend has many positive days
+// and few negative ones, driving the score very negative. A jumpy winner
+// driven by a few large positive days has roughly balanced %pos and %neg
+// and therefore a near-zero score. Lower is better.
+func computeFIP(prices []float64, pret float64) float64 {
+	if len(prices) < 3 {
+		return math.NaN()
+	}
+
+	pos, neg, total := 0, 0, 0
+
+	for i := 1; i < len(prices); i++ {
+		prev, curr := prices[i-1], prices[i]
+		if math.IsNaN(prev) || math.IsNaN(curr) || prev == 0 {
+			continue
+		}
+
+		ret := (curr - prev) / prev
+		switch {
+		case ret > 0:
+			pos++
+		case ret < 0:
+			neg++
+		}
+
+		total++
+	}
+
+	if total == 0 {
+		return math.NaN()
+	}
+
+	pPos := float64(pos) / float64(total)
+	pNeg := float64(neg) / float64(total)
+	sign := 0.0
+
+	switch {
+	case pret > 0:
+		sign = 1
+	case pret < 0:
+		sign = -1
+	}
+
+	return sign * (pNeg - pPos)
+}
+
+// lastIdxOnOrBefore returns the largest index i such that times[i] <= target,
+// or -1 if no such index exists. Times are assumed strictly increasing.
+func lastIdxOnOrBefore(times []time.Time, target time.Time) int {
+	last := -1
+
+	for i, t := range times {
+		if t.After(target) {
+			break
+		}
+
+		last = i
+	}
+
+	return last
 }

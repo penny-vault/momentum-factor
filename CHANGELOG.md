@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0] - 2026-05-03
+
+### Added
+- Frog-In-the-Pan smoothness filter and market-cap floor parameters
+- `qmom` and `classic` presets
+
+
+### Changed
+- Default behavior is now Gray & Vogel's QMOM (FIP filter on, $1B market-cap floor); use `--preset classic` for the previous Jegadeesh-Titman behavior
+
 ## [0.2.0] - 2026-05-03
 
 ### Changed
@@ -49,3 +59,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [0.1.3]: https://github.com/penny-vault/momentum-factor/compare/v0.1.2...v0.1.3
 [0.1.4]: https://github.com/penny-vault/momentum-factor/compare/v0.1.3...v0.1.4
 [0.2.0]: https://github.com/penny-vault/momentum-factor/compare/v0.1.4...v0.2.0
+[1.0.0]: https://github.com/penny-vault/momentum-factor/compare/v0.2.0...v1.0.0
