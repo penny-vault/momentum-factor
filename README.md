@@ -22,6 +22,8 @@ The two refinements on top of vanilla 12-1 momentum:
 - **Top Holdings**: final number of stocks to hold (default: `50`).
 - **FIP Quantile**: smoothest fraction of momentum-ranked stocks to actually hold (default: `0.50`). Set to `1.0` to disable the FIP filter and reduce to vanilla Jegadeesh-Titman momentum. The momentum cut is sized as `TopHoldings / FipQuantile` so the FIP halving lands back at `TopHoldings`.
 - **Min Market Cap**: minimum market cap in USD for a stock to qualify (default: `1000000000` = $1B). Set negative to disable; use `--preset classic` for the classic configuration.
+- **Trend Filter**: when enabled, holds the cash ticker whenever VFINX's 1-3-6 risk-adjusted momentum score is at or below zero (default: `false`). Targets deep, sustained bear markets; pays a small whipsaw cost in mostly-bull regimes.
+- **Cash Ticker**: defensive ticker held when the trend filter is bearish (default: `BIL`).
 
 ## Presets
 

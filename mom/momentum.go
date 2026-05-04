@@ -43,6 +43,8 @@ type MomentumFactor struct {
 	TopHoldings  int     `pvbt:"top-holdings" desc:"Final number of stocks to hold (after the FIP filter halves the momentum cut)" default:"50" suggest:"SP500=50|NASDAQ100=10"`
 	FipQuantile  float64 `pvbt:"fip-quantile" desc:"Of the momentum-ranked stocks, smoothest fraction by FIP to hold; 1.0 disables the FIP filter" default:"0.50" suggest:"classic=1.0|qmom=0.50"`
 	MinMarketCap float64 `pvbt:"min-market-cap" desc:"Minimum market capitalization (USD); set negative to disable" default:"1000000000" suggest:"classic=-1|qmom=1000000000"`
+	TrendFilter  bool    `pvbt:"trend-filter" desc:"When enabled, hold the cash ticker whenever VFINX 1-3-6 risk-adjusted momentum is non-positive" default:"false"`
+	CashTicker   string  `pvbt:"cash-ticker" desc:"Defensive ticker held when the trend filter is bearish" default:"BIL"`
 }
 
 func (s *MomentumFactor) Name() string {
@@ -56,7 +58,7 @@ func (s *MomentumFactor) Describe() engine.StrategyDescription {
 		ShortCode:   "mom",
 		Description: description,
 		Source:      "https://doi.org/10.1111/j.1540-6261.1993.tb04702.x",
-		Version:     "1.0.0",
+		Version:     "1.1.0",
 		VersionDate: time.Date(2026, 5, 3, 0, 0, 0, 0, time.UTC),
 		Schedule:    "@monthend",
 		Benchmark:   "VFINX",
@@ -79,6 +81,29 @@ func (s *MomentumFactor) Compute(ctx context.Context, eng *engine.Engine, _ port
 	momentumCutTarget := int(math.Round(float64(topHoldings) / fipQuantile))
 	if momentumCutTarget < topHoldings {
 		momentumCutTarget = topHoldings
+	}
+
+	// Optional trend filter: when VFINX's 1-3-6 risk-adjusted momentum score
+	// is at or below zero, allocate to the defensive cash ticker and skip the
+	// momentum rebalance. Targets the unhedged-momentum-crash failure mode
+	// (e.g. 2008). Off by default; pays a small whipsaw cost in mostly-bull
+	// regimes for substantial protection in deep, sustained bear markets.
+	if s.TrendFilter {
+		bearish, err := s.evaluateTrendFilter(ctx, eng, batch)
+		if err != nil {
+			return err
+		}
+
+		if bearish {
+			cash := eng.Asset(s.CashTicker)
+			alloc := portfolio.Allocation{
+				Date:          eng.CurrentDate(),
+				Members:       map[asset.Asset]float64{cash: 1.0},
+				Justification: fmt.Sprintf("trend filter: VFINX 1-3-6 momentum non-positive, holding %s", s.CashTicker),
+			}
+
+			return batch.RebalanceTo(ctx, alloc)
+		}
 	}
 
 	indexUniverse := eng.IndexUniverse(s.IndexName)
@@ -268,6 +293,46 @@ func (s *MomentumFactor) Compute(ctx context.Context, eng *engine.Engine, _ port
 	}
 
 	return nil
+}
+
+// evaluateTrendFilter returns true when VFINX's 1-3-6 risk-adjusted momentum
+// score (the average of 1, 3, and 6 month RiskAdjustedPct) is at or below
+// zero. VFINX is the strategy's benchmark and serves as the broad-equity
+// trend signal.
+func (s *MomentumFactor) evaluateTrendFilter(ctx context.Context, eng *engine.Engine, batch *portfolio.Batch) (bool, error) {
+	trendAsset := eng.Asset("VFINX")
+	trendUniv := eng.Universe(trendAsset)
+
+	// Need 7 monthly bars to compute 6-month momentum.
+	trendDF, err := trendUniv.Window(ctx, portfolio.Months(7), data.AdjClose)
+	if err != nil {
+		return false, fmt.Errorf("trend filter fetch: %w", err)
+	}
+
+	monthly := trendDF.Downsample(data.Monthly).Last()
+	if monthly.Len() < 7 {
+		return false, nil
+	}
+
+	mom1 := monthly.RiskAdjustedPct(1)
+	mom3 := monthly.RiskAdjustedPct(3)
+	mom6 := monthly.RiskAdjustedPct(6)
+
+	score := mom1.Add(mom3).Add(mom6).DivScalar(3).Drop(math.NaN()).Last()
+	if score.Len() == 0 {
+		return false, nil
+	}
+
+	scoreVal := score.Value(trendAsset, data.AdjClose)
+	if math.IsNaN(scoreVal) {
+		return false, nil
+	}
+
+	bearish := scoreVal <= 0
+	batch.Annotate("trend-filter", map[bool]string{true: "bearish", false: "bullish"}[bearish])
+	batch.Annotate("trend-score", fmt.Sprintf("%.4f", scoreVal))
+
+	return bearish, nil
 }
 
 // computeFIP returns the Frog-In-the-Pan score from Da, Gurun & Warachka
