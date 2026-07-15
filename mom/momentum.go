@@ -58,8 +58,8 @@ func (s *MomentumFactor) Describe() engine.StrategyDescription {
 		ShortCode:   "mom",
 		Description: description,
 		Source:      "https://doi.org/10.1111/j.1540-6261.1993.tb04702.x",
-		Version:     "1.1.0",
-		VersionDate: time.Date(2026, 5, 3, 0, 0, 0, 0, time.UTC),
+		Version:     "1.1.1",
+		VersionDate: time.Date(2026, 7, 14, 0, 0, 0, 0, time.UTC),
 		Schedule:    "@monthend",
 		Benchmark:   "SPY",
 	}
